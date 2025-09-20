@@ -6,12 +6,13 @@
 //! The program displays information in a human-readable format to the console
 //! and exports the raw data as JSON to a file for programmatic use.
 
-use sysinfo::{System, SystemExt};
+use sysinfo::{System, SystemExt, NetworkExt, DiskExt};
 use serde::{Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::error::Error;
 use std::fmt;
+use std::collections::HashMap;
 
 /// Custom error types for application-specific error handling.
 ///
@@ -79,11 +80,39 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Disk usage information for a single disk/partition.
+#[derive(Serialize)]
+struct DiskInfo {
+    /// Disk name or mount point
+    name: String,
+    /// File system type (e.g., "NTFS", "ext4", "APFS")
+    file_system: String,
+    /// Total disk space in bytes
+    total_space: u64,
+    /// Available disk space in bytes
+    available_space: u64,
+}
+
+/// Network interface information.
+#[derive(Serialize)]
+struct NetworkInfo {
+    /// Interface name (e.g., "eth0", "wlan0", "Ethernet")
+    name: String,
+    /// Total bytes received since boot
+    bytes_received: u64,
+    /// Total bytes transmitted since boot
+    bytes_transmitted: u64,
+    /// Total packets received since boot
+    packets_received: u64,
+    /// Total packets transmitted since boot
+    packets_transmitted: u64,
+}
+
 /// System information data structure for serialization and display.
 ///
 /// Contains comprehensive system metrics including operating system details,
-/// CPU information, and memory/swap usage statistics. All memory values
-/// are stored as raw bytes for accuracy and consistency.
+/// CPU information, memory/swap usage statistics, disk usage, and network interfaces.
+/// All memory and disk values are stored as raw bytes for accuracy and consistency.
 #[derive(Serialize)]
 struct SystemInfo {
     /// Operating system name (e.g., "Windows", "Linux", "macOS")
@@ -100,6 +129,10 @@ struct SystemInfo {
     total_swap: u64,
     /// Currently used swap space in bytes
     used_swap: u64,
+    /// Disk usage information for all detected disks
+    disks: Vec<DiskInfo>,
+    /// Network interface statistics
+    networks: Vec<NetworkInfo>,
 }
 
 /// Core application logic for collecting and outputting system information.
@@ -122,6 +155,27 @@ fn run() -> Result<(), AppError> {
     let mut sys = System::new_all();
     sys.refresh_all();
 
+    // Collect disk information
+    let disks: Vec<DiskInfo> = sys.disks().iter().map(|disk| {
+        DiskInfo {
+            name: disk.mount_point().to_string_lossy().to_string(),
+            file_system: String::from_utf8_lossy(disk.file_system()).to_string(),
+            total_space: disk.total_space(),
+            available_space: disk.available_space(),
+        }
+    }).collect();
+
+    // Collect network information
+    let networks: Vec<NetworkInfo> = sys.networks().iter().map(|(name, network)| {
+        NetworkInfo {
+            name: name.clone(),
+            bytes_received: network.received(),
+            bytes_transmitted: network.transmitted(),
+            packets_received: network.packets_received(),
+            packets_transmitted: network.packets_transmitted(),
+        }
+    }).collect();
+
     let info = SystemInfo {
         os_name: sys.name().unwrap_or_else(|| "N/A".to_string()),
         os_version: sys.os_version().unwrap_or_else(|| "N/A".to_string()),
@@ -130,6 +184,8 @@ fn run() -> Result<(), AppError> {
         used_memory: sys.used_memory(),
         total_swap: sys.total_swap(),
         used_swap: sys.used_swap(),
+        disks,
+        networks,
     };
 
     println!("System Information:");
@@ -140,6 +196,45 @@ fn run() -> Result<(), AppError> {
     println!("  Used Memory: {}", format_bytes(info.used_memory));
     println!("  Total Swap: {}", format_bytes(info.total_swap));
     println!("  Used Swap: {}", format_bytes(info.used_swap));
+
+    println!("\nDisk Usage:");
+    if info.disks.is_empty() {
+        println!("  No disks detected");
+    } else {
+        for disk in &info.disks {
+            let used_space = disk.total_space - disk.available_space;
+            let usage_percent = if disk.total_space > 0 {
+                (used_space as f64 / disk.total_space as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!("  {}: {} / {} ({:.1}% used, {} available) [{}]",
+                disk.name,
+                format_bytes(used_space),
+                format_bytes(disk.total_space),
+                usage_percent,
+                format_bytes(disk.available_space),
+                disk.file_system
+            );
+        }
+    }
+
+    println!("\nNetwork Interfaces:");
+    if info.networks.is_empty() {
+        println!("  No network interfaces detected");
+    } else {
+        for network in &info.networks {
+            println!("  {}:", network.name);
+            println!("    Received: {} ({} packets)",
+                format_bytes(network.bytes_received),
+                network.packets_received
+            );
+            println!("    Transmitted: {} ({} packets)",
+                format_bytes(network.bytes_transmitted),
+                network.packets_transmitted
+            );
+        }
+    }
 
     let json = serde_json::to_string_pretty(&info)
         .map_err(AppError::JsonSerialization)?;
